@@ -4,7 +4,7 @@
 Tiny Tkinter GUI:
 1. Load a .txt file
 2. Auto-extract cards (16-digit + 3 CVV OR Amex 15-digit + 4 CVV) + optional balance
-3. Sort by balance or BIN prefix (asc)
+3. Sort by balance, BIN prefix, or currency order (USD, CAD, AUD)
 4. Show results + Save formatted output to a new .txt
 """
 
@@ -32,15 +32,23 @@ RE_SLASH = re.compile(
     re.IGNORECASE
 )
 
+# priority for currency sorting
+CURRENCY_PRIORITY = {"USD": 0, "CAD": 1, "AUD": 2}
 
-def parse_balance(raw: str) -> float:
+
+def parse_balance(raw: str) -> tuple[float, str]:
+    """
+    Parse raw balance string like 'CAD$10.31'.
+    Returns (value: float, currency: str).
+    """
     if not raw:
-        return 0.0
-    num = re.sub(r'[^\d\.]', '', raw)
+        return 0.0, ""
+    currency = raw[:3]
+    number = re.sub(r'[^\d\.]', '', raw)
     try:
-        return float(num)
-    except:
-        return 0.0
+        return float(number), currency
+    except ValueError:
+        return 0.0, currency
 
 
 def luhn_ok(num: str) -> bool:
@@ -63,74 +71,84 @@ def looks_like_card(number: str, cvv: str) -> bool:
     return (len(number) == 16 and len(cvv) == 3) or is_amex(number, cvv)
 
 
-def extract_cards(text: str):
+def extract_cards(text: str) -> list[dict]:
+    """
+    Extract card entries with optional balances from text.
+    Returns list of dicts with keys number, mm, yy, cvv, balance_raw, balance, currency.
+    """
     found, seen = [], set()
-    def push(m):
-        num = m.group("number")
-        mm, yy, cvv = m.group("mm"), m.group("yy"), m.group("cvv")
-        bal_raw = m.group("balance") or ""
+    def push(match: re.Match):
+        num = match.group("number")
+        mm, yy, cvv = match.group("mm"), match.group("yy"), match.group("cvv")
+        bal_raw = match.group("balance") or ""
         key = f"{num}:{mm}:{yy}:{cvv}:{bal_raw}"
         if key in seen:
             return
-        if not looks_like_card(num, cvv):
+        if not looks_like_card(num, cvv) or not luhn_ok(num):
             return
-        if not luhn_ok(num):
-            return
+        value, currency = parse_balance(bal_raw)
         seen.add(key)
         found.append({
             "number": num,
-            "mm": mm, "yy": yy, "cvv": cvv,
+            "mm": mm,
+            "yy": yy,
+            "cvv": cvv,
             "balance_raw": bal_raw,
-            "balance": parse_balance(bal_raw),
+            "balance": value,
+            "currency": currency,
         })
-    for m in RE_COLON.finditer(text): push(m)
-    for m in RE_SLASH.finditer(text): push(m)
+    for m in RE_COLON.finditer(text):
+        push(m)
+    for m in RE_SLASH.finditer(text):
+        push(m)
     return found
 
 # --------- GUI ----------
 class CardExtractorGUI:
-    def __init__(self, root):
+    def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("Card Extractor – Sort by Balance/BIN")
-        root.geometry("900x650")
+        root.title("Card Extractor – Multi-sort Mode")
+        root.geometry("900x700")
 
         self.file_path = tk.StringVar()
-        self.cards = []
-        self.sort_mode = tk.StringVar(value="balance")  # or 'bin'
+        self.cards: list[dict] = []
+        self.sort_mode = tk.StringVar(value="balance")  # options: 'balance', 'bin', 'currency'
 
-        frm_top = ttk.Frame(root, padding=10)
-        frm_top.pack(fill="x")
-        ttk.Label(frm_top, text="Input file:").pack(side="left")
-        ttk.Entry(frm_top, textvariable=self.file_path, width=60).pack(side="left", padx=5)
-        ttk.Button(frm_top, text="Browse", command=self.browse_file).pack(side="left")
-        ttk.Button(frm_top, text="Extract", command=self.extract).pack(side="left", padx=5)
+        # Top controls
+        top = ttk.Frame(root, padding=10)
+        top.pack(fill="x")
+        ttk.Label(top, text="Input file:").pack(side="left")
+        ttk.Entry(top, textvariable=self.file_path, width=60).pack(side="left", padx=5)
+        ttk.Button(top, text="Browse", command=self.browse_file).pack(side="left")
+        ttk.Button(top, text="Extract", command=self.extract).pack(side="left", padx=5)
 
-        frm_sort = ttk.Frame(root, padding=(10,0))
-        frm_sort.pack(fill="x")
-        ttk.Label(frm_sort, text="Sort by:").pack(side="left")
-        ttk.Radiobutton(frm_sort, text="Balance desc", variable=self.sort_mode, value="balance", command=self.resort).pack(side="left", padx=5)
-        ttk.Radiobutton(frm_sort, text="BIN asc",     variable=self.sort_mode, value="bin",     command=self.resort).pack(side="left", padx=5)
+        # Sort options
+        opts = ttk.Frame(root, padding=(10, 5))
+        opts.pack(fill="x")
+        ttk.Label(opts, text="Sort by:").pack(side="left")
+        ttk.Radiobutton(opts, text="Balance ↓", variable=self.sort_mode, value="balance", command=self.resort).pack(side="left", padx=5)
+        ttk.Radiobutton(opts, text="BIN ↑",     variable=self.sort_mode, value="bin",      command=self.resort).pack(side="left", padx=5)
+        ttk.Radiobutton(opts, text="Currency",  variable=self.sort_mode, value="currency", command=self.resort).pack(side="left", padx=5)
 
-        frm_mid = ttk.Frame(root, padding=(10,5))
-        frm_mid.pack(fill="both", expand=True)
-        ttk.Label(frm_mid, text="Extracted cards:").pack(anchor="w")
-        self.output_box = scrolledtext.ScrolledText(frm_mid, wrap="none")
+        # Display area
+        mid = ttk.Frame(root, padding=(10, 5))
+        mid.pack(fill="both", expand=True)
+        ttk.Label(mid, text="Extracted cards:").pack(anchor="w")
+        self.output_box = scrolledtext.ScrolledText(mid, wrap="none")
         self.output_box.pack(fill="both", expand=True)
 
-        frm_bot = ttk.Frame(root, padding=10)
-        frm_bot.pack(fill="x")
-        ttk.Button(frm_bot, text="Copy to Clipboard", command=self.copy_clip).pack(side="left")
-        ttk.Button(frm_bot, text="Save .txt", command=self.save_file).pack(side="left", padx=5)
-        ttk.Button(frm_bot, text="Clear", command=self.clear_output).pack(side="left", padx=5)
+        # Bottom controls
+        bot = ttk.Frame(root, padding=10)
+        bot.pack(fill="x")
+        ttk.Button(bot, text="Copy to Clipboard", command=self.copy_clip).pack(side="left")
+        ttk.Button(bot, text="Save .txt", command=self.save_file).pack(side="left", padx=5)
+        ttk.Button(bot, text="Clear", command=self.clear_output).pack(side="left", padx=5)
 
-        self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(root, textvariable=self.status_var, anchor="w").pack(fill="x", padx=10, pady=(0,10))
+        self.status = tk.StringVar(value="Ready.")
+        ttk.Label(root, textvariable=self.status, anchor="w").pack(fill="x", padx=10, pady=(0,10))
 
     def browse_file(self):
-        path = filedialog.askopenfilename(
-            title="Select text file",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
-        )
+        path = filedialog.askopenfilename(title="Select text file", filetypes=[("Text files", "*.txt"), ("All files", "*.*")])
         if path:
             self.file_path.set(path)
 
@@ -139,51 +157,56 @@ class CardExtractorGUI:
         if not p.exists():
             messagebox.showerror("Error", "No file selected or file not found.")
             return
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        self.cards = extract_cards(text)
+        txt = p.read_text(encoding="utf-8", errors="ignore")
+        self.cards = extract_cards(txt)
         if not self.cards:
             self.clear_output()
-            self.status_var.set("0 cards found.")
+            self.status.set("0 cards found.")
             return
         self.resort()
 
     def resort(self):
         mode = self.sort_mode.get()
         if mode == "balance":
-            lst = sorted(self.cards, key=lambda c: c["balance"], reverse=True)
-        else:
-            lst = sorted(self.cards, key=lambda c: c["number"])
-        self.display(lst)
+            ordered = sorted(self.cards, key=lambda c: c["balance"], reverse=True)
+        elif mode == "bin":
+            ordered = sorted(self.cards, key=lambda c: c["number"])
+        else:  # currency
+            ordered = sorted(
+                self.cards,
+                key=lambda c: (CURRENCY_PRIORITY.get(c["currency"], 99), -c["balance"])
+            )
+        self.display(ordered)
 
-    def display(self, lst):
+    def display(self, data: list[dict]):
         self.output_box.delete("1.0", tk.END)
-        for c in lst:
-            line = f'{c["number"]}:{c["mm"]}:{c["yy"]}:{c["cvv"]}'
-            if c["balance_raw"]:
-                line += f':{c["balance_raw"]}'
-            self.output_box.insert(tk.END, line+"\n")
-        self.status_var.set(f"{len(lst)} card(s) displayed.")
+        for c in data:
+            line = f"{c['number']}:{c['mm']}:{c['yy']}:{c['cvv']}"
+            if c['balance_raw']:
+                line += f":{c['balance_raw']}"
+            self.output_box.insert(tk.END, line + "\n")
+        self.status.set(f"{len(data)} card(s) displayed.")
 
     def copy_clip(self):
-        data = self.output_box.get("1.0", tk.END).strip()
-        if data:
+        text = self.output_box.get("1.0", tk.END).strip()
+        if text:
             self.root.clipboard_clear()
-            self.root.clipboard_append(data)
-            self.status_var.set("Copied to clipboard.")
+            self.root.clipboard_append(text)
+            self.status.set("Copied to clipboard.")
 
     def save_file(self):
-        data = self.output_box.get("1.0", tk.END).strip()
-        if not data:
+        text = self.output_box.get("1.0", tk.END).strip()
+        if not text:
             messagebox.showinfo("Nothing to save", "Output is empty.")
             return
-        out = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files","*.txt")])
-        if out:
-            Path(out).write_text(data, encoding="utf-8")
-            self.status_var.set(f"Saved to {out}")
+        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
+        if path:
+            Path(path).write_text(text, encoding="utf-8")
+            self.status.set(f"Saved to {path}")
 
     def clear_output(self):
         self.output_box.delete("1.0", tk.END)
-        self.status_var.set("Cleared.")
+        self.status.set("Cleared.")
 
 if __name__ == "__main__":
     root = tk.Tk()
