@@ -24,37 +24,40 @@ RE_SLASH = re.compile(
     rf"\b",
     re.IGNORECASE
 )
-EU_LINE = re.compile(r'^\s*\d+,\d+\s*$')
+EU_LINE = re.compile(r"^\s*\d+(?:,\d+)?\s*$")
 
 # priority for currency sorting
 CURRENCY_PRIORITY = {"USD": 0, "CAD": 1, "AUD": 2}
 
 def parse_balance(raw: str) -> tuple[float, str]:
     """
-    Smarter parse: Accepts
+    Parse raw balance from formats:
     - 'CAD$10.31', '$1.95', 'US$46.14', 'CAD$82.23'
-    - 'balance CAD$82.23 not used on Paypal'
-    - '82,11'
-    - '... | $100.00' or ':rjQFDmliWl | $100.00'
-    Returns (value, currency). Defaults to USD.
+    - EU comma '88,8', '87,88'
+    - Plain integer '200'
+    Returns (value, currency). Defaults currency to USD if unspecified.
     """
-    if not raw:
-        return 0.0, ''
-    raw = raw.strip()
-    # Always extract the first matching balance token in the string
-    m = re.search(r'([A-Z]{1,3})?\$(\d+(?:\.\d{2})?)', raw)
+    raw = (raw or '').strip()
+    if '|' in raw:
+        raw = raw.rsplit('|', 1)[-1].strip()
+    raw = re.sub(r'(?i)^balance\s+', '', raw).strip()
+    # EU decimal
+    if re.match(r"^\d+,\d+$", raw):
+        return float(raw.replace(',', '.')), 'USD'
+    # Plain integer
+    if re.match(r"^\d+$", raw):
+        return float(raw), 'USD'
+    # currency$amount or $amount
+    m = re.match(r"^(?P<cur>[A-Z]{1,3})?\$(?P<amt>\d+(?:\.\d{2})?)$", raw)
     if m:
-        cur = m.group(1) or 'USD'
-        return float(m.group(2)), cur
-    # EU-style: only numbers and comma
-    m_eu = re.search(r'(\d+,\d+)', raw)
-    if m_eu:
-        return float(m_eu.group(1).replace(',', '.')), 'USD'
-    # fallback: find a bare number with dot
-    m_num = re.search(r'(\d+\.\d{2})', raw)
-    if m_num:
-        return float(m_num.group(1)), 'USD'
-    return 0.0, ''
+        cur = m.group('cur') or 'USD'
+        return float(m.group('amt')), cur
+    # fallback: extract digits and dot
+    num = re.sub(r'[^\d\.]', '', raw)
+    try:
+        return float(num), 'USD'
+    except:
+        return 0.0, ''
 
 def extract_cards(text: str) -> list[dict]:
     """
