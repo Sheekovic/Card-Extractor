@@ -1,13 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Tiny Tkinter GUI:
-1. Load a .txt file
-2. Auto-extract cards (16-digit + 3 CVV OR Amex 15-digit + 4 CVV) + optional balance (USD, CAD$, EU comma)
-3. Sort by balance, BIN prefix, or currency order (USD, CAD, AUD)
-4. Show results + Save formatted output to a new .txt
-"""
-
 import re
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
@@ -39,36 +29,79 @@ EU_LINE = re.compile(r'^\s*\d+,\d+\s*$')
 # priority for currency sorting
 CURRENCY_PRIORITY = {"USD": 0, "CAD": 1, "AUD": 2}
 
-
 def parse_balance(raw: str) -> tuple[float, str]:
     """
-    Parse raw balance from formats:
+    Smarter parse: Accepts
     - 'CAD$10.31', '$1.95', 'US$46.14', 'CAD$82.23'
-    - EU comma '88,8', '87,88'
-    Returns (value, currency).
-    Defaults currency to USD if unspecified.
+    - 'balance CAD$82.23 not used on Paypal'
+    - '82,11'
+    - '... | $100.00' or ':rjQFDmliWl | $100.00'
+    Returns (value, currency). Defaults to USD.
     """
-    raw = (raw or '').strip()
-    # if random chars before '|', strip up to last '|'
-    if '|' in raw:
-        raw = raw.rsplit('|', 1)[-1].strip()
-    # remove leading 'balance' case-insensitive
-    raw = re.sub(r'^balance\s+', '', raw, flags=re.I).strip()
-    # EU decimal
-    if re.match(r"^\d+,\d+$", raw):
-        return float(raw.replace(',', '.')), 'USD'
-    # currency$amount or $amount
-    m = re.match(r"^(?P<cur>[A-Z]{1,3})?\$(?P<amt>\d+(?:\.\d{2})?)$", raw)
-    if m:
-        cur = m.group('cur') or 'USD'
-        return float(m.group('amt')), cur
-    # fallback: extract digits and dot
-    num = re.sub(r'[^\d\.]', '', raw)
-    try:
-        return float(num), 'USD'
-    except:
+    if not raw:
         return 0.0, ''
+    raw = raw.strip()
+    # Always extract the first matching balance token in the string
+    m = re.search(r'([A-Z]{1,3})?\$(\d+(?:\.\d{2})?)', raw)
+    if m:
+        cur = m.group(1) or 'USD'
+        return float(m.group(2)), cur
+    # EU-style: only numbers and comma
+    m_eu = re.search(r'(\d+,\d+)', raw)
+    if m_eu:
+        return float(m_eu.group(1).replace(',', '.')), 'USD'
+    # fallback: find a bare number with dot
+    m_num = re.search(r'(\d+\.\d{2})', raw)
+    if m_num:
+        return float(m_num.group(1)), 'USD'
+    return 0.0, ''
 
+def extract_cards(text: str) -> list[dict]:
+    """
+    Robust extractor: Handles single-line and multi-line balances,
+    plus inline/junk tokens and trailing tokens.
+    """
+    found, seen = [], set()
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        # 1. Try colon (preferred) or slash patterns
+        m = RE_COLON.search(line) or RE_SLASH.search(line)
+        if m:
+            num = m.group('number')
+            mm, yy, cvv = m.group('mm'), m.group('yy'), m.group('cvv')
+            bal_raw = (m.group('balance') or '').strip()
+            # If no inline balance, look for one after colon, pipe, or 'balance' in line
+            if not bal_raw:
+                # Look for balance token after any separator or anywhere in line
+                extra = line.split(':', 4)[-1]
+                bal_match = re.search(r'([A-Z]{1,3})?\$\d+(?:\.\d{2})?', extra)
+                if not bal_match:
+                    bal_match = re.search(r'(\d+,\d+)', extra)
+                if not bal_match:
+                    # Also try full line (catch things like "| $100.00" or "balance CAD$82.23 ...")
+                    bal_match = re.search(r'([A-Z]{1,3})?\$\d+(?:\.\d{2})?|(\d+,\d+)', line)
+                if bal_match:
+                    bal_raw = bal_match.group(0)
+            # If still no balance, check next line (EU style)
+            if not bal_raw and i + 1 < len(lines):
+                nextline = lines[i + 1].strip()
+                if re.fullmatch(r'\d+,\d+', nextline):
+                    bal_raw = nextline
+                    i += 1  # skip next line
+            key = f"{num}:{mm}:{yy}:{cvv}:{bal_raw}"
+            if key in seen or not looks_like_card(num, cvv) or not luhn_ok(num):
+                i += 1
+                continue
+            val, cur = parse_balance(bal_raw)
+            seen.add(key)
+            found.append({
+                'number': num, 'mm': mm, 'yy': yy, 'cvv': cvv,
+                'balance_raw': bal_raw, 'balance': val, 'currency': cur
+            })
+        i += 1
+    return found
 
 def luhn_ok(num: str) -> bool:
     total, rev = 0, num[::-1]
@@ -81,48 +114,11 @@ def luhn_ok(num: str) -> bool:
         total += n
     return total % 10 == 0
 
-
 def is_amex(number: str, cvv: str) -> bool:
     return len(number) == 15 and number.startswith(("34", "37")) and len(cvv) == 4
 
-
 def looks_like_card(number: str, cvv: str) -> bool:
     return (len(number) == 16 and len(cvv) == 3) or is_amex(number, cvv)
-
-
-def extract_cards(text: str) -> list[dict]:
-    """
-    Extract card entries + optional balances, including cross-line EU balances.
-    Returns list of dicts: number, mm, yy, cvv, balance_raw, balance, currency.
-    """
-    found, seen = [], set()
-    # first pass: regex on entire text
-    for regex in (RE_COLON, RE_SLASH):
-        for m in regex.finditer(text):
-            num = m.group('number')
-            mm, yy, cvv = m.group('mm'), m.group('yy'), m.group('cvv')
-            bal_raw = (m.group('balance') or '').strip()
-            key = f"{num}:{mm}:{yy}:{cvv}:{bal_raw}"
-            if key in seen or not looks_like_card(num, cvv) or not luhn_ok(num):
-                continue
-            val, cur = parse_balance(bal_raw)
-            seen.add(key)
-            found.append({
-                'number': num, 'mm': mm, 'yy': yy, 'cvv': cvv,
-                'balance_raw': bal_raw, 'balance': val, 'currency': cur
-            })
-    # second pass: handle EU comma-only lines following a card
-    lines = text.splitlines()
-    idx = 0
-    for i, line in enumerate(lines):
-        if EU_LINE.match(line) and found:
-            entry = found[-1]
-            if entry['balance_raw'] == '':
-                val, cur = parse_balance(line)
-                entry['balance_raw'] = line.strip()
-                entry['balance'], entry['currency'] = val, cur
-    return found
-
 
 # --------- GUI ----------
 class CardExtractorGUI:
