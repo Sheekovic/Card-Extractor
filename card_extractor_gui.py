@@ -15,20 +15,21 @@ from tkinter import ttk
 from pathlib import Path
 
 # --------- REGEXES for extraction ----------
+# capture optional 3-letter code or none before $amount
 RE_COLON = re.compile(
-    r'\b(?P<number>\d{15,16})\s*:\s*'
-    r'(?P<mm>\d{2})\s*:\s*'
-    r'(?P<yy>\d{2})\s*:\s*'
-    r'(?P<cvv>\d{3,4})'
-    r'(?:\s*:\s*(?P<balance>[A-Z]{3}\$\d+(?:\.\d{2})?))?'
-    r'\b'
+    r"\b(?P<number>\d{15,16})\s*:\s*"
+    r"(?P<mm>\d{2})\s*:\s*"
+    r"(?P<yy>\d{2})\s*:\s*"
+    r"(?P<cvv>\d{3,4})"
+    r"(?:\s*:\s*(?P<balance>(?:[A-Z]{3})?\$\d+(?:\.\d{2})?))?"
+    r"\b"
 )
 RE_SLASH = re.compile(
-    r'\b(?P<number>\d{15,16})\D+'
-    r'(?P<mm>\d{2})/(?P<yy>\d{2})\D+'
-    r'(?P<cvv>\d{3,4})'
-    r'(?:.*?\b(?P<balance>[A-Z]{3}\$\d+(?:\.\d{2})?))?'
-    r'\b',
+    r"\b(?P<number>\d{15,16})\D+"
+    r"(?P<mm>\d{2})/(?P<yy>\d{2})\D+"
+    r"(?P<cvv>\d{3,4})"
+    r"(?:.*?\b(?P<balance>(?:[A-Z]{3})?\$\d+(?:\.\d{2})?))?"
+    r"\b",
     re.IGNORECASE
 )
 
@@ -38,17 +39,24 @@ CURRENCY_PRIORITY = {"USD": 0, "CAD": 1, "AUD": 2}
 
 def parse_balance(raw: str) -> tuple[float, str]:
     """
-    Parse raw balance string like 'CAD$10.31'.
+    Parse raw balance like 'CAD$10.31', '$1.95', or '| $1.95'.
     Returns (value: float, currency: str).
     """
+    raw = (raw or "").strip()
     if not raw:
         return 0.0, ""
-    currency = raw[:3]
-    number = re.sub(r'[^\d\.]', '', raw)
+    # match optional 3-letter currency + $ + amount
+    m = re.match(r'^(?P<cur>[A-Z]{3})?\$(?P<amt>\d+(?:\.\d{2})?)$', raw)
+    if m:
+        currency = m.group('cur') or 'USD'
+        amount = float(m.group('amt'))
+        return amount, currency
+    # fallback: extract number, assume USD
+    num = re.sub(r'[^\d\.]', '', raw)
     try:
-        return float(number), currency
+        return float(num), 'USD'
     except ValueError:
-        return 0.0, currency
+        return 0.0, ''
 
 
 def luhn_ok(num: str) -> bool:
@@ -198,17 +206,3 @@ class CardExtractorGUI:
         text = self.output_box.get("1.0", tk.END).strip()
         if not text:
             messagebox.showinfo("Nothing to save", "Output is empty.")
-            return
-        path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("Text files", "*.txt")])
-        if path:
-            Path(path).write_text(text, encoding="utf-8")
-            self.status.set(f"Saved to {path}")
-
-    def clear_output(self):
-        self.output_box.delete("1.0", tk.END)
-        self.status.set("Cleared.")
-
-if __name__ == "__main__":
-    root = tk.Tk()
-    CardExtractorGUI(root)
-    root.mainloop()
