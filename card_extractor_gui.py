@@ -3,7 +3,7 @@
 """
 Tiny Tkinter GUI:
 1. Load a .txt file
-2. Auto-extract cards (16-digit + 3 CVV OR Amex 15-digit + 4 CVV) + optional balance
+2. Auto-extract cards (16-digit + 3 CVV OR Amex 15-digit + 4 CVV) + optional balance (USD, CAD$, EU comma)
 3. Sort by balance, BIN prefix, or currency order (USD, CAD, AUD)
 4. Show results + Save formatted output to a new .txt
 """
@@ -14,24 +14,27 @@ from tkinter import filedialog, messagebox, scrolledtext
 from tkinter import ttk
 from pathlib import Path
 
+# --------- BALANCE PATTERN ----------
+BAL_PATTERN = r'(?:[A-Z]{1,3})?\$\d+(?:\.\d{2})?|\d+,\d+'
+
 # --------- REGEXES for extraction ----------
-# capture optional balance: either $style or EU comma decimal
 RE_COLON = re.compile(
-    r"\b(?P<number>\d{15,16})\s*:\s*"
-    r"(?P<mm>\d{2})\s*:\s*"
-    r"(?P<yy>\d{2})\s*:\s*"
-    r"(?P<cvv>\d{3,4})"
-    r"(?:\s*:\s*(?P<balance>(?:[A-Z]{3}\$\d+(?:\.\d{2})?|\d+,\d+)))?"
-    r"\b"
+    rf"\b(?P<number>\d{{15,16}})\s*:\s*"
+    rf"(?P<mm>\d{{2}})\s*:\s*"
+    rf"(?P<yy>\d{{2}})\s*:\s*"
+    rf"(?P<cvv>\d{{3,4}})"
+    rf"(?:\s*:\s*(?P<balance>{BAL_PATTERN}))?"
+    rf"\b"
 )
 RE_SLASH = re.compile(
-    r"\b(?P<number>\d{15,16})\D+"
-    r"(?P<mm>\d{2})/(?P<yy>\d{2})\D+"
-    r"(?P<cvv>\d{3,4})"
-    r"(?:.*?\b(?P<balance>(?:[A-Z]{3}\$\d+(?:\.\d{2})?|\d+,\d+)))?"
-    r"\b",
+    rf"\b(?P<number>\d{{15,16}})\D+"
+    rf"(?P<mm>\d{{2}})/(?P<yy>\d{{2}})\D+"
+    rf"(?P<cvv>\d{{3,4}})"
+    rf"(?:.*?\b(?P<balance>{BAL_PATTERN}))?"
+    rf"\b",
     re.IGNORECASE
 )
+EU_LINE = re.compile(r'^\s*\d+,\d+\s*$')
 
 # priority for currency sorting
 CURRENCY_PRIORITY = {"USD": 0, "CAD": 1, "AUD": 2}
@@ -39,29 +42,31 @@ CURRENCY_PRIORITY = {"USD": 0, "CAD": 1, "AUD": 2}
 
 def parse_balance(raw: str) -> tuple[float, str]:
     """
-    Parse raw balance:
-    - 'CAD$10.31', '$1.95' → (10.31, 'CAD'/'USD')
-    - '88,8' or '87,88' → (88.8, 'USD')
-    - fallback removes non-digits/dot → (value, 'USD')
+    Parse raw balance from formats:
+    - 'CAD$10.31', '$1.95', 'US$46.14', 'CAD$82.23'
+    - EU comma '88,8', '87,88'
+    Returns (value, currency).
+    Defaults currency to USD if unspecified.
     """
-    raw = (raw or "").strip().lstrip('|').strip()
-    if not raw:
-        return 0.0, ''
-    # EU decimal, comma notation
-    m_eu = re.match(r'^(?P<amt>\d+,\d+)$', raw)
-    if m_eu:
-        val = float(m_eu.group('amt').replace(',', '.'))
-        return val, 'USD'
-    # currency$amount
-    m_cur = re.match(r'^(?P<cur>[A-Z]{3})?\$(?P<amt>\d+(?:\.\d{2})?)$', raw)
-    if m_cur:
-        cur = m_cur.group('cur') or 'USD'
-        return float(m_cur.group('amt')), cur
+    raw = (raw or '').strip()
+    # if random chars before '|', strip up to last '|'
+    if '|' in raw:
+        raw = raw.split('|')[-1].strip()
+    # remove leading 'balance'
+    raw = re.sub(r'^(?i)balance\s+', '', raw).strip()
+    # EU decimal
+    if re.match(r'^\d+,\d+$', raw):
+        return float(raw.replace(',', '.')), 'USD'
+    # currency$amount or $amount
+    m = re.match(r'^(?P<cur>[A-Z]{1,3})?\$(?P<amt>\d+(?:\.\d{2})?)$', raw)
+    if m:
+        cur = m.group('cur') or 'USD'
+        return float(m.group('amt')), cur
     # fallback: extract digits and dot
     num = re.sub(r'[^\d\.]', '', raw)
     try:
         return float(num), 'USD'
-    except ValueError:
+    except:
         return 0.0, ''
 
 
@@ -87,33 +92,35 @@ def looks_like_card(number: str, cvv: str) -> bool:
 
 def extract_cards(text: str) -> list[dict]:
     """
-    Extract card entries with optional balances from text.
-    Returns list of dicts with keys number, mm, yy, cvv, balance_raw, balance, currency.
+    Extract card entries + optional balances, including cross-line EU balances.
+    Returns list of dicts: number, mm, yy, cvv, balance_raw, balance, currency.
     """
     found, seen = [], set()
-    def push(match: re.Match):
-        num = match.group('number')
-        mm, yy, cvv = match.group('mm'), match.group('yy'), match.group('cvv')
-        bal_raw = match.group('balance') or ''
-        key = f"{num}:{mm}:{yy}:{cvv}:{bal_raw}"
-        if key in seen:
-            return
-        if not looks_like_card(num, cvv) or not luhn_ok(num):
-            return
-        val, cur = parse_balance(bal_raw)
-        seen.add(key)
-        found.append({
-            'number': num,
-            'mm': mm,
-            'yy': yy,
-            'cvv': cvv,
-            'balance_raw': bal_raw,
-            'balance': val,
-            'currency': cur,
-        })
-    # first pass
-    for m in RE_COLON.finditer(text): push(m)
-    for m in RE_SLASH.finditer(text): push(m)
+    # first pass: regex on entire text
+    for regex in (RE_COLON, RE_SLASH):
+        for m in regex.finditer(text):
+            num = m.group('number')
+            mm, yy, cvv = m.group('mm'), m.group('yy'), m.group('cvv')
+            bal_raw = (m.group('balance') or '').strip()
+            key = f"{num}:{mm}:{yy}:{cvv}:{bal_raw}"
+            if key in seen or not looks_like_card(num, cvv) or not luhn_ok(num):
+                continue
+            val, cur = parse_balance(bal_raw)
+            seen.add(key)
+            found.append({
+                'number': num, 'mm': mm, 'yy': yy, 'cvv': cvv,
+                'balance_raw': bal_raw, 'balance': val, 'currency': cur
+            })
+    # second pass: handle EU comma-only lines following a card
+    lines = text.splitlines()
+    idx = 0
+    for i, line in enumerate(lines):
+        if EU_LINE.match(line) and found:
+            entry = found[-1]
+            if entry['balance_raw'] == '':
+                val, cur = parse_balance(line)
+                entry['balance_raw'] = line.strip()
+                entry['balance'], entry['currency'] = val, cur
     return found
 
 
@@ -121,14 +128,14 @@ def extract_cards(text: str) -> list[dict]:
 class CardExtractorGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title('Card Extractor – Multi-sort Mode')
-        root.geometry('900x700')
+        root.title('Card Extractor – Enhanced')
+        root.geometry('900x750')
 
         self.file_path = tk.StringVar()
         self.cards: list[dict] = []
-        self.sort_mode = tk.StringVar(value='balance')  # 'balance', 'bin', 'currency'
+        self.sort_mode = tk.StringVar(value='balance')
 
-        # Top
+        # Top controls
         top = ttk.Frame(root, padding=10)
         top.pack(fill='x')
         ttk.Label(top, text='Input file:').pack(side='left')
@@ -136,13 +143,13 @@ class CardExtractorGUI:
         ttk.Button(top, text='Browse', command=self.browse_file).pack(side='left')
         ttk.Button(top, text='Extract', command=self.extract).pack(side='left', padx=5)
 
-        # Sort
+        # Sort options
         opts = ttk.Frame(root, padding=(10,5))
         opts.pack(fill='x')
         ttk.Label(opts, text='Sort by:').pack(side='left')
-        ttk.Radiobutton(opts, text='Balance ↓',  variable=self.sort_mode, value='balance',  command=self.resort).pack(side='left', padx=5)
-        ttk.Radiobutton(opts, text='BIN ↑',      variable=self.sort_mode, value='bin',      command=self.resort).pack(side='left', padx=5)
-        ttk.Radiobutton(opts, text='Currency',   variable=self.sort_mode, value='currency', command=self.resort).pack(side='left', padx=5)
+        ttk.Radiobutton(opts, text='Balance ↓', variable=self.sort_mode, value='balance', command=self.resort).pack(side='left', padx=5)
+        ttk.Radiobutton(opts, text='BIN ↑',     variable=self.sort_mode, value='bin',     command=self.resort).pack(side='left', padx=5)
+        ttk.Radiobutton(opts, text='Currency',  variable=self.sort_mode, value='currency', command=self.resort).pack(side='left', padx=5)
 
         # Display
         mid = ttk.Frame(root, padding=(10,5))
@@ -155,14 +162,14 @@ class CardExtractorGUI:
         bot = ttk.Frame(root, padding=10)
         bot.pack(fill='x')
         ttk.Button(bot, text='Copy to Clipboard', command=self.copy_clip).pack(side='left')
-        ttk.Button(bot, text='Save .txt',         command=self.save_file).pack(side='left', padx=5)
-        ttk.Button(bot, text='Clear',              command=self.clear_output).pack(side='left', padx=5)
+        ttk.Button(bot, text='Save .txt', command=self.save_file).pack(side='left', padx=5)
+        ttk.Button(bot, text='Clear', command=self.clear_output).pack(side='left', padx=5)
 
         self.status = tk.StringVar(value='Ready.')
         ttk.Label(root, textvariable=self.status, anchor='w').pack(fill='x', padx=10, pady=(0,10))
 
     def browse_file(self):
-        path = filedialog.askopenfilename(title='Select text file', filetypes=[('Text files','*.txt'),('All files','*.*')])
+        path = filedialog.askopenfilename(filetypes=[('Text files','*.txt'),('All','*.*')])
         if path:
             self.file_path.set(path)
 
@@ -171,8 +178,8 @@ class CardExtractorGUI:
         if not p.exists():
             messagebox.showerror('Error','No file selected or file not found.')
             return
-        txt = p.read_text(encoding='utf-8', errors='ignore')
-        self.cards = extract_cards(txt)
+        text = p.read_text(encoding='utf-8', errors='ignore')
+        self.cards = extract_cards(text)
         if not self.cards:
             self.clear_output()
             self.status.set('0 cards found.')
@@ -195,25 +202,25 @@ class CardExtractorGUI:
             line = f"{c['number']}:{c['mm']}:{c['yy']}:{c['cvv']}"
             if c['balance_raw']:
                 line += f":{c['balance_raw']}"
-            self.output_box.insert(tk.END,line+'\n')
+            self.output_box.insert(tk.END, line+'\n')
         self.status.set(f"{len(data)} card(s) displayed.")
 
     def copy_clip(self):
-        t = self.output_box.get('1.0',tk.END).strip()
-        if t:
+        txt = self.output_box.get('1.0',tk.END).strip()
+        if txt:
             self.root.clipboard_clear()
-            self.root.clipboard_append(t)
+            self.root.clipboard_append(txt)
             self.status.set('Copied to clipboard.')
 
     def save_file(self):
-        t = self.output_box.get('1.0',tk.END).strip()
-        if not t:
+        txt = self.output_box.get('1.0',tk.END).strip()
+        if not txt:
             messagebox.showinfo('Nothing to save','Output is empty.')
             return
-        path = filedialog.asksaveasfilename(defaultextension='.txt',filetypes=[('Text files','*.txt')])
-        if path:
-            Path(path).write_text(t,encoding='utf-8')
-            self.status.set(f"Saved to {path}")
+        out = filedialog.asksaveasfilename(defaultextension='.txt',filetypes=[('Text files','*.txt')])
+        if out:
+            Path(out).write_text(txt,encoding='utf-8')
+            self.status.set(f"Saved to {out}")
 
     def clear_output(self):
         self.output_box.delete('1.0',tk.END)
