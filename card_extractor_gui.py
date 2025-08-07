@@ -51,14 +51,14 @@ def parse_balance(raw: str) -> tuple[float, str]:
     raw = (raw or '').strip()
     # if random chars before '|', strip up to last '|'
     if '|' in raw:
-        raw = raw.split('|')[-1].strip()
-    # remove leading 'balance'
-    raw = re.sub(r'^(?i)balance\s+', '', raw).strip()
+        raw = raw.rsplit('|', 1)[-1].strip()
+    # remove leading 'balance' case-insensitive
+    raw = re.sub(r'^balance\s+', '', raw, flags=re.I).strip()
     # EU decimal
-    if re.match(r'^\d+,\d+$', raw):
+    if re.match(r"^\d+,\d+$", raw):
         return float(raw.replace(',', '.')), 'USD'
     # currency$amount or $amount
-    m = re.match(r'^(?P<cur>[A-Z]{1,3})?\$(?P<amt>\d+(?:\.\d{2})?)$', raw)
+    m = re.match(r"^(?P<cur>[A-Z]{1,3})?\$(?P<amt>\d+(?:\.\d{2})?)$", raw)
     if m:
         cur = m.group('cur') or 'USD'
         return float(m.group('amt')), cur
